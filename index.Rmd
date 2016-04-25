@@ -1,0 +1,136 @@
+---
+title: "MachineLearningCurls"
+author: "David R. T. Fraser"
+date: "April 24, 2016"
+output: html_document
+---
+
+*****
+
+##**Purpose:**
+
+The purpose of this project is to predict the manner in which an individual did an exercise, which is encoded in the "classe" variable by the letters A, B, C, D, and E. These 5 possible classe outcomes correspond to five different ways of performing unilateral dumbbell bicep curls: (A) means that the participant performed the curl exactly according to the specification; (B) means that the participant threw their elbows to the front; (C) means that the participant was lifting the dumbbell only halfway; (D) means that the participant was lowering the dumbbell only halfway; and (E) means that the participant was throwing their hips to the front.  More generally, this data was collected in an attempt to use machine learning to facilitate the recognition of correct bicep curl execution.  
+
+The exercises were performed by six male participants aged between 20-28 years, with little weight lifting experience.
+
+*****
+
+##**Feature Selection:**
+
+Loading in the data sets:
+```{r}
+suppressMessages(library(caret))
+setwd("~/Desktop")
+trainlocation <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+testlocation <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+download.file(trainlocation, destfile = "~/Desktop/training.csv", method="curl")
+download.file(testlocation, destfile = "~/Desktop/testing.csv", method="curl")
+training <- read.csv("training.csv", header=TRUE, sep=",", na.strings = c("NA",""))
+testing <- read.csv("testing.csv", header=TRUE, sep=",", na.strings = c("NA",""))
+```
+
+After looking at the data in Excel, it is clear that a large number of columns are likely to have nearly zero variance, consist of NAs, or contain information which isn't that useful.  Before I remove these columns, it would be nice to ensure that whatever features are selected or deleted from my training set are also selected or deleted from my testing set.  To ensure that this is the case I temporarily join the training and testing data sets and then perform my feature selection.
+
+```{r}
+trainrows <- dim(training)[1]
+testrows <- dim(testing)[1]
+jointdata <- rbind(training[,-160],testing[,-160])
+nearzeros <- nearZeroVar(jointdata)
+jointdata <- jointdata[,-nearzeros]
+jointdata <- jointdata[,-(1:5)]
+NAcolumns <- sapply(jointdata, function(x) mean(is.na(x)) > .75)
+jointdata <- jointdata[,NAcolumns==F]
+```
+
+Now I re-split the data into the original training and testing sets. 
+
+*****
+
+##**Cross-Validation:**  
+In order to be able to estimate the training set accuracy I'm going to perform cross-validation where the data is split based on the classe variable.  The reason for this is that I'd like to be able to calculate my out-of-sample error rate for the models I fit, and putting aside some data now allows me to do so.  Practically, what this means is that I now want to split the training set into two further sets: a train.train set and a train.test set.  I will use the train.train set for training my models, and will use the train.test set to measure the accuracy of my model predictions.
+
+```{r}
+train <- jointdata[1:trainrows,]
+train <- cbind(train,classe=training$classe)
+test <- jointdata[(trainrows+1:dim(jointdata)[1]),]
+inTrain <- createDataPartition(y=train$classe, p=.7, list=FALSE)
+train.train <- train[inTrain,]
+train.test <- train[-inTrain,]
+```
+
+*****
+
+##**Model Building & Selection:**  
+
+####*A Decision Tree Model*  
+Since I have no idea how difficult it will be to produce accurate predictions from these features, it would be nice to start with a model that is easy to interpret and understand. I start by fitting a decision tree and calculating its out-of-sample error rate.
+```{r, cache=TRUE}
+suppressMessages(library(rattle))
+library(rpart)
+set.seed(1500)
+decisiontree <- train(classe~.,method="rpart", data=train.train)
+fancyRpartPlot(decisiontree$finalModel)
+```  
+
+Based on this tree (and the corresponding output which I've excluded) it doesn't look like this is a great model.  In particular, it looks as though the model struggles to both identify and distinguish between activities B and C. Regardless, though it is still informative to see how this model would perform on the testing set.
+
+```{r}
+set.seed(1500)
+suppressMessages(predictions <- predict(decisiontree,newdata = train.test))
+confusionMatrix(train.test$classe, predictions)
+```
+
+As suspected this decision tree is a fairly poor fit having an accuracy rate of roughly 50%.  
+
+####*A Random Forest Model*  
+I'd like to have a much, much better model before I submit my predictions for evaluation by Coursera.  Random forest models are often more accurate than trees, so I'll try fitting this type of model.
+
+```{r, cache=TRUE}
+suppressMessages(library(randomForest))
+set.seed(1500)
+randomf <-train(classe~.,method="rf", data=train.train)
+```
+
+Based on the in-sample accuracy of this random forest (which fit 27 different trees) it looks like this will be a much, much, better fit - though it is important to remember that in-sample accuracy will tend to overestimate of how accurate the model is. To gain a better understanding of what features are important in this model I take a look at the Variable Importance Plot.
+
+```{r}
+suppressMessages(library(randomForest))
+varImpPlot(randomf$finalModel, main = "Model Fit: The Importance of Individual Predictors", cex=0.75, sort=TRUE)
+```
+
+The way to interpret this plot is that those features with the largest mean decrease Gini are the features which are most important to the random forest model; that is to say that these are the features which play the greatest role in partitioning the data into defined classes.  As a result, this plot indicates that the "num window"" and "roll belt"" features are by far the most important features for the random forest model that I've just fit.  
+
+(Aside: Re-running the random forest algorithm where "classe" is determined solely by "num window" increases the overall accuracy of the random forest algorithm - which indicates that something strange is going on.  With some research I discovered that the "num window" variable is just a different identifier for the movement being performed.  That is to say, "num window" is just "classe" encoded in a different way.  As a result it's pretty clear that this variable shouldn't have been included with the data set because it acts as a perfect predictor for the movement being performed.  However, I'll just ignore all this and stick with the random forest model that I've already fit.)
+
+Since I know that the in-sample accuracy overstates how well the model performs, I now calculate the out-of-sample error using the train.test set. 
+
+```{r}
+set.seed(1500)
+predictionsrf <- predict(randomf,newdata = train.test)
+confusionMatrix(train.test$classe, predictionsrf)
+```
+Based on the confusion matrix accuracy we can expect an out-of-sample-error rate that is (roughly) less than .5%  which is fairly phenomenal - though unsurprising given what I now know about "num window".  
+
+####*A Boosted Tree Model*  
+I think it's doubtful that I'll be able to come up with a better fit than the random forest model above, but I'll also fit a boosted tree model just to see how it does.
+
+```{r, cache=TRUE}
+set.seed(1500)
+suppressMessages(boosting <- train(classe~.,data=train.train, method="gbm", verbose=FALSE))
+predictionsgbm <- predict(boosting,newdata = train.test)
+confusionMatrix(train.test$classe, predictionsgbm)
+```
+Based on the accuracy given in the printout above, this boosted model has an out-of-sample error rate that is pretty good (roughly less than 2%) but which isn't quite as good as the random forest.  
+
+*****
+
+##**Conclusion:**  
+The purpose of this project was to predict the "classe" variable - the manor in which an individual performed unilateral dumbbell bicep curls, given that it could take on five possible values each of which represented a different way of performing the curls.  In this task my random forest model has been a success, predicting with an almost perfect level of accuracy.
+
+Since this assignment also requires that I submit some predictions to Coursera, I predict using my random forest model.
+
+```{r, cache=TRUE}
+set.seed(1500)
+predictionsrf <- predict(randomf, newdata = test)
+predictionsrf
+```
